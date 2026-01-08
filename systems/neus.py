@@ -33,11 +33,15 @@ class NeuSSystem(BaseSystem):
 
         # --- [MODIFICATION START] LOAD PRIOR ---
         # Update this path to where your .npy files are located
-        prior_dir = "/content/drive/MyDrive/votre_dossier_dataset/prior_data"
-        
+        prior_dir = os.getenv("PRIOR_DIR")
+        if prior_dir is None:
+            raise RuntimeError(
+                "Environment variable PRIOR_DIR is not set. "
+                "Please export PRIOR_DIR=/path/to/prior before running."
+            )
         try:
             # We use allow_pickle=True as discussed
-            sdf_vol_np = np.load(os.path.join(prior_dir, "sdf_volume_smooth.npy"), allow_pickle=True)
+            sdf_vol_np = np.load(os.path.join(prior_dir, "sdf_volume.npy"), allow_pickle=True)
             
             # Create a 5D tensor (1, 1, D, H, W) for grid_sample
             # Note: numpy is (D, H, W), pytorch grid_sample expects (N, C, D, H, W)
