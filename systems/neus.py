@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_efficient_distloss import flatten_eff_distloss
+import json
+import numpy as np
+import os
 
 import pytorch_lightning as pl
 from pytorch_lightning.utilities.rank_zero import rank_zero_info, rank_zero_debug
@@ -27,6 +30,33 @@ class NeuSSystem(BaseSystem):
         }
         self.train_num_samples = self.config.model.train_num_rays * (self.config.model.num_samples_per_ray + self.config.model.get('num_samples_per_ray_bg', 0))
         self.train_num_rays = self.config.model.train_num_rays
+
+        # --- [MODIFICATION START] LOAD PRIOR ---
+        # Update this path to where your .npy files are located
+        prior_dir = "/content/drive/MyDrive/votre_dossier_dataset/prior_data"
+        
+        try:
+            # We use allow_pickle=True as discussed
+            sdf_vol_np = np.load(os.path.join(prior_dir, "sdf_volume_smooth.npy"), allow_pickle=True)
+            
+            # Create a 5D tensor (1, 1, D, H, W) for grid_sample
+            # Note: numpy is (D, H, W), pytorch grid_sample expects (N, C, D, H, W)
+            self.register_buffer("sdf_prior_vol", torch.from_numpy(sdf_vol_np).float().unsqueeze(0).unsqueeze(0))
+            
+            # Load metadata to map World Coords -> Grid Coords
+            with open(os.path.join(prior_dir, "sdf_config.json"), 'r') as f:
+                meta = json.load(f)
+            
+            self.register_buffer("prior_min", torch.tensor(meta["min_bound"]).float())
+            self.register_buffer("prior_max", torch.tensor(meta["max_bound"]).float())
+            
+            self.use_prior = True
+            rank_zero_info("✅ PRIOR LOADED SUCCESSFULLY: sdf_volume_smooth.npy")
+            
+        except Exception as e:
+            rank_zero_info(f"⚠️ WARNING: Could not load prior: {e}")
+            self.use_prior = False
+        # --- [MODIFICATION END] ---
 
     def forward(self, batch):
         return self.model(batch['rays'])
@@ -85,6 +115,41 @@ class NeuSSystem(BaseSystem):
             'fg_mask': fg_mask
         })      
     
+    # --- [MODIFICATION START] HELPER FUNCTION ---
+    def get_prior_sdf_at(self, points):
+        """
+        Samples the pre-computed SDF grid at the given World points.
+        points: (N, 3) tensor
+        Returns: (N, 1) tensor of SDF values
+        """
+        if not self.use_prior:
+            return torch.zeros(points.shape[0], 1, device=points.device)
+        
+        # 1. Normalize World Coords to Grid Coords [-1, 1]
+        denom = self.prior_max - self.prior_min
+        # Avoid division by zero
+        denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+        points_norm = 2 * (points - self.prior_min) / denom - 1
+        
+        # 2. Reshape for grid_sample: (1, 1, 1, N, 3)
+        # We treat points as a 1D strip of pixels in a 3D volume
+        grid_coords = points_norm.view(1, 1, 1, -1, 3)
+        
+        # 3. Sample
+        # Note: grid_sample expects (x, y, z). 
+        # Ensure your NPY generation matched this or swap coordinates if flipped.
+        prior_values = F.grid_sample(
+            self.sdf_prior_vol, 
+            grid_coords, 
+            mode='bilinear', 
+            padding_mode='border', 
+            align_corners=True
+        )
+        
+        # Output is (1, 1, 1, 1, N) -> View as (N, 1)
+        return prior_values.view(-1, 1)
+    # --- [MODIFICATION END] ---
+
     def training_step(self, batch, batch_idx):
         out = self(batch)
 
@@ -137,6 +202,29 @@ class NeuSSystem(BaseSystem):
             loss_distortion_bg = flatten_eff_distloss(out['weights_bg'], out['points_bg'], out['intervals_bg'], out['ray_indices_bg'])
             self.log('train/loss_distortion_bg', loss_distortion_bg)
             loss += loss_distortion_bg * self.C(self.config.system.loss.lambda_distortion_bg)        
+
+        # --- [MODIFICATION START] PRIOR LOSS ---
+        if self.use_prior:
+            # We need the points where SDF was evaluated.
+            # In instant-nsr-pl, they are usually in out['points']
+            if 'points' in out and 'sdf_samples' in out:
+                points_samples = out['points'] # (N_samples, 3)
+                sdf_pred = out['sdf_samples']  # (N_samples, 1) - output of network
+                
+                # Get the target SDF from our Prior Grid
+                sdf_target = self.get_prior_sdf_at(points_samples)
+                
+                # Calculate L1 Loss
+                loss_prior_val = F.l1_loss(sdf_pred, sdf_target)
+                
+                # Decay strategy: High influence at start, lower later
+                # Example: Start at 1.0, decay to 0.1 over 10k steps
+                # Or keep it simple: Fixed weight for now
+                lambda_prior = 1.0 
+                
+                self.log('train/loss_prior', loss_prior_val)
+                loss += lambda_prior * loss_prior_val
+        # --- [MODIFICATION END] ---
 
         losses_model_reg = self.model.regularizations(out)
         for name, value in losses_model_reg.items():
@@ -207,7 +295,7 @@ class NeuSSystem(BaseSystem):
                     for oi, index in enumerate(step_out['index']):
                         out_set[index[0].item()] = {'psnr': step_out['psnr'][oi]}
             psnr = torch.mean(torch.stack([o['psnr'] for o in out_set.values()]))
-            self.log('val/psnr', psnr, prog_bar=True, rank_zero_only=True)         
+            self.log('val/psnr', psnr, prog_bar=True, rank_zero_only=True)          
 
     def test_step(self, batch, batch_idx):
         out = self(batch)
@@ -262,4 +350,4 @@ class NeuSSystem(BaseSystem):
         self.save_mesh(
             f"it{self.global_step}-{self.config.model.geometry.isosurface.method}{self.config.model.geometry.isosurface.resolution}.obj",
             **mesh
-        )        
+        )
