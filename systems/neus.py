@@ -209,28 +209,49 @@ class NeuSSystem(BaseSystem):
             loss += loss_distortion_bg * self.C(self.config.system.loss.lambda_distortion_bg)        
 
         # --- [MODIFICATION START] PRIOR LOSS ---
-        if self.use_prior:
-            # We need the points where SDF was evaluated.
-            # In instant-nsr-pl, they are usually in out['points']
-            if 'points' in out and 'sdf_samples' in out:
-                points_samples = out['points'] # (N_samples, 3)
-                sdf_pred = out['sdf_samples']  # (N_samples, 1) - output of network
+        if self.use_prior and 'sdf_samples' in out:
+            points_3d = None
+            
+            # Cas 1 : "points" contient juste des distances t (1D) -> On doit recalculer XYZ
+            # C'est votre cas (Erreur 701174 vs 3)
+            if 'points' in out and out['points'].ndim == 1:
+                if 'ray_indices' in out and 'rays' in batch:
+                    # On récupère les rayons (Origine et Direction)
+                    rays = batch['rays'] # (Num_Rays, 6)
+                    rays_o, rays_d = rays[:, :3], rays[:, 3:6]
+                    
+                    # On récupère les indices pour savoir quel point appartient à quel rayon
+                    ray_idx = out['ray_indices'].long() # (Num_Samples)
+                    t_vals = out['points']              # (Num_Samples) - Ce sont les profondeurs t
+                    
+                    # Formule : Point = Origine + t * Direction
+                    # On utilise ray_idx pour prendre le bon rayon pour chaque échantillon
+                    points_3d = rays_o[ray_idx] + rays_d[ray_idx] * t_vals.unsqueeze(-1)
+            
+            # Cas 2 : "points" est déjà en 3D (N, 3)
+            elif 'points' in out and out['points'].ndim == 2 and out['points'].shape[-1] == 3:
+                points_3d = out['points']
                 
-                # Get the target SDF from our Prior Grid
-                sdf_target = self.get_prior_sdf_at(points_samples)
+            # Si on a réussi à obtenir des points 3D, on calcule la loss
+            if points_3d is not None:
+                sdf_pred = out['sdf_samples']
                 
-                # Calculate L1 Loss
+                # On interroge le Prior
+                sdf_target = self.get_prior_sdf_at(points_3d)
+                
                 loss_prior_val = F.l1_loss(sdf_pred, sdf_target)
                 
-                # Decay strategy: High influence at start, lower later
-                # Example: Start at 1.0, decay to 0.1 over 10k steps
-                # Or keep it simple: Fixed weight for now
-                lambda_prior = 1.0 
-                
+                # Poids (Lambda)
+                # Vous pouvez lire la config ou mettre une valeur fixe
+                # lambda_prior = self.C(self.config.system.loss.lambda_prior)
+                lambda_prior = 1.0 # Valeur par défaut si non trouvée
+                if hasattr(self.config.system.loss, 'lambda_prior'):
+                     lambda_prior = self.C(self.config.system.loss.lambda_prior)
+
                 self.log('train/loss_prior', loss_prior_val)
                 loss += lambda_prior * loss_prior_val
         # --- [MODIFICATION END] ---
-
+        
         losses_model_reg = self.model.regularizations(out)
         for name, value in losses_model_reg.items():
             self.log(f'train/loss_{name}', value)
