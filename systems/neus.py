@@ -19,11 +19,6 @@ from systems.criterions import PSNR, binary_cross_entropy
 
 @systems.register('neus-system')
 class NeuSSystem(BaseSystem):
-    """
-    Two ways to print to console:
-    1. self.print: correctly handle progress bar
-    2. rank_zero_info: use the logging module
-    """
     def prepare(self):
         self.criterions = {
             'psnr': PSNR()
@@ -33,21 +28,22 @@ class NeuSSystem(BaseSystem):
 
         # --- [MODIFICATION START] LOAD PRIOR ---
         # Update this path to where your .npy files are located
-        prior_dir = os.getenv("PRIOR_DIR")
-        if prior_dir is None:
-            raise RuntimeError(
-                "Environment variable PRIOR_DIR is not set. "
-                "Please export PRIOR_DIR=/path/to/prior before running."
-            )
+        prior_dir = "/content/dataset82wmask/prior_data"
+        # Si le dossier n'existe pas, essayez le dossier par défaut
+        if not os.path.exists(prior_dir):
+             prior_dir = "/content/dataset82wmask/prior_data" 
+        
         try:
-            # We use allow_pickle=True as discussed
-            sdf_vol_np = np.load(os.path.join(prior_dir, "sdf_volume.npy"), allow_pickle=True)
+            # On cherche le fichier smooth ou standard
+            if os.path.exists(os.path.join(prior_dir, "sdf_volume_smooth.npy")):
+                path_npy = os.path.join(prior_dir, "sdf_volume_smooth.npy")
+            else:
+                path_npy = os.path.join(prior_dir, "sdf_volume.npy")
             
-            # Create a 5D tensor (1, 1, D, H, W) for grid_sample
-            # Note: numpy is (D, H, W), pytorch grid_sample expects (N, C, D, H, W)
+            sdf_vol_np = np.load(path_npy, allow_pickle=True)
+            
             self.register_buffer("sdf_prior_vol", torch.from_numpy(sdf_vol_np).float().unsqueeze(0).unsqueeze(0))
             
-            # Load metadata to map World Coords -> Grid Coords
             with open(os.path.join(prior_dir, "sdf_config.json"), 'r') as f:
                 meta = json.load(f)
             
@@ -55,8 +51,7 @@ class NeuSSystem(BaseSystem):
             self.register_buffer("prior_max", torch.tensor(meta["max_bound"]).float())
             
             self.use_prior = True
-            rank_zero_info("✅ PRIOR LOADED SUCCESSFULLY: sdf_volume_smooth.npy")
-            print("✅ PRIOR LOADED SUCCESSFULLY: sdf_volume_smooth.npy")
+            rank_zero_info(f"✅ PRIOR LOADED SUCCESSFULLY from {path_npy}")
             
         except Exception as e:
             rank_zero_info(f"⚠️ WARNING: Could not load prior: {e}")
@@ -122,27 +117,19 @@ class NeuSSystem(BaseSystem):
     
     # --- [MODIFICATION START] HELPER FUNCTION ---
     def get_prior_sdf_at(self, points):
-        """
-        Samples the pre-computed SDF grid at the given World points.
-        points: (N, 3) tensor
-        Returns: (N, 1) tensor of SDF values
-        """
         if not self.use_prior:
             return torch.zeros(points.shape[0], 1, device=points.device)
         
-        # 1. Normalize World Coords to Grid Coords [-1, 1]
+        # Sécurité : Si les points ne sont pas 3D, on retourne 0 pour éviter le crash
+        if points.ndim != 2 or points.shape[-1] != 3:
+            return torch.zeros(points.shape[0], 1, device=points.device)
+
         denom = self.prior_max - self.prior_min
-        # Avoid division by zero
         denom = torch.where(denom == 0, torch.ones_like(denom), denom)
         points_norm = 2 * (points - self.prior_min) / denom - 1
         
-        # 2. Reshape for grid_sample: (1, 1, 1, N, 3)
-        # We treat points as a 1D strip of pixels in a 3D volume
         grid_coords = points_norm.view(1, 1, 1, -1, 3)
         
-        # 3. Sample
-        # Note: grid_sample expects (x, y, z). 
-        # Ensure your NPY generation matched this or swap coordinates if flipped.
         prior_values = F.grid_sample(
             self.sdf_prior_vol, 
             grid_coords, 
@@ -150,8 +137,6 @@ class NeuSSystem(BaseSystem):
             padding_mode='border', 
             align_corners=True
         )
-        
-        # Output is (1, 1, 1, 1, N) -> View as (N, 1)
         return prior_values.view(-1, 1)
     # --- [MODIFICATION END] ---
 
@@ -160,7 +145,6 @@ class NeuSSystem(BaseSystem):
 
         loss = 0.
 
-        # update train_num_rays
         if self.config.model.dynamic_ray_sampling:
             train_num_rays = int(self.train_num_rays * (self.train_num_samples / out['num_samples_full'].sum().item()))        
             self.train_num_rays = min(int(self.train_num_rays * 0.9 + train_num_rays * 0.1), self.config.model.max_train_num_rays)
@@ -191,13 +175,11 @@ class NeuSSystem(BaseSystem):
         loss += loss_sparsity * self.C(self.config.system.loss.lambda_sparsity)
 
         if self.C(self.config.system.loss.lambda_curvature) > 0:
-            assert 'sdf_laplace_samples' in out, "Need geometry.grad_type='finite_difference' to get SDF Laplace samples"
+            assert 'sdf_laplace_samples' in out
             loss_curvature = out['sdf_laplace_samples'].abs().mean()
             self.log('train/loss_curvature', loss_curvature)
             loss += loss_curvature * self.C(self.config.system.loss.lambda_curvature)
 
-        # distortion loss proposed in MipNeRF360
-        # an efficient implementation from https://github.com/sunset1995/torch_efficient_distloss
         if self.C(self.config.system.loss.lambda_distortion) > 0:
             loss_distortion = flatten_eff_distloss(out['weights'], out['points'], out['intervals'], out['ray_indices'])
             self.log('train/loss_distortion', loss_distortion)
@@ -208,50 +190,47 @@ class NeuSSystem(BaseSystem):
             self.log('train/loss_distortion_bg', loss_distortion_bg)
             loss += loss_distortion_bg * self.C(self.config.system.loss.lambda_distortion_bg)        
 
-        # --- [MODIFICATION START] PRIOR LOSS ---
+        # --- [MODIFICATION START] PRIOR LOSS FIXED ---
         if self.use_prior and 'sdf_samples' in out:
             points_3d = None
             
-            # Cas 1 : "points" contient juste des distances t (1D) -> On doit recalculer XYZ
-            # C'est votre cas (Erreur 701174 vs 3)
+            # Cas A : Les points sont des profondeurs 1D (C'est votre BUG actuel)
             if 'points' in out and out['points'].ndim == 1:
+                # Il faut reconstruire la 3D : Rayon_Origine + t * Rayon_Direction
                 if 'ray_indices' in out and 'rays' in batch:
-                    # On récupère les rayons (Origine et Direction)
-                    rays = batch['rays'] # (Num_Rays, 6)
+                    # batch['rays'] contient tous les rayons (N_rays, 6)
+                    rays = batch['rays']
                     rays_o, rays_d = rays[:, :3], rays[:, 3:6]
                     
-                    # On récupère les indices pour savoir quel point appartient à quel rayon
-                    ray_idx = out['ray_indices'].long() # (Num_Samples)
-                    t_vals = out['points']              # (Num_Samples) - Ce sont les profondeurs t
+                    # ray_indices dit "le point i appartient au rayon j"
+                    ray_idx = out['ray_indices'].long()
                     
-                    # Formule : Point = Origine + t * Direction
-                    # On utilise ray_idx pour prendre le bon rayon pour chaque échantillon
+                    # Profondeurs t
+                    t_vals = out['points'] 
+                    
+                    # RECONSTRUCTION VECTORISÉE
                     points_3d = rays_o[ray_idx] + rays_d[ray_idx] * t_vals.unsqueeze(-1)
-            
-            # Cas 2 : "points" est déjà en 3D (N, 3)
+
+            # Cas B : Les points sont déjà 3D (parfois le cas selon la config)
             elif 'points' in out and out['points'].ndim == 2 and out['points'].shape[-1] == 3:
                 points_3d = out['points']
-                
-            # Si on a réussi à obtenir des points 3D, on calcule la loss
+            
+            # Si on a réussi à avoir la 3D, on calcule la loss
             if points_3d is not None:
                 sdf_pred = out['sdf_samples']
-                
-                # On interroge le Prior
                 sdf_target = self.get_prior_sdf_at(points_3d)
                 
                 loss_prior_val = F.l1_loss(sdf_pred, sdf_target)
                 
-                # Poids (Lambda)
-                # Vous pouvez lire la config ou mettre une valeur fixe
-                # lambda_prior = self.C(self.config.system.loss.lambda_prior)
-                lambda_prior = 1.0 # Valeur par défaut si non trouvée
+                # Récupération du poids Lambda
+                lambda_prior = 1.0
                 if hasattr(self.config.system.loss, 'lambda_prior'):
-                     lambda_prior = self.C(self.config.system.loss.lambda_prior)
-
+                    lambda_prior = self.C(self.config.system.loss.lambda_prior)
+                
                 self.log('train/loss_prior', loss_prior_val)
                 loss += lambda_prior * loss_prior_val
         # --- [MODIFICATION END] ---
-        
+
         losses_model_reg = self.model.regularizations(out)
         for name, value in losses_model_reg.items():
             self.log(f'train/loss_{name}', value)
@@ -269,18 +248,6 @@ class NeuSSystem(BaseSystem):
         return {
             'loss': loss
         }
-    
-    """
-    # aggregate outputs from different devices (DP)
-    def training_step_end(self, out):
-        pass
-    """
-    
-    """
-    # aggregate outputs from different iterations
-    def training_epoch_end(self, out):
-        pass
-    """
     
     def validation_step(self, batch, batch_idx):
         out = self(batch)
@@ -301,22 +268,13 @@ class NeuSSystem(BaseSystem):
             'index': batch['index']
         }
           
-    
-    """
-    # aggregate outputs from different devices when using DP
-    def validation_step_end(self, out):
-        pass
-    """
-    
     def validation_epoch_end(self, out):
         out = self.all_gather(out)
         if self.trainer.is_global_zero:
             out_set = {}
             for step_out in out:
-                # DP
                 if step_out['index'].ndim == 1:
                     out_set[step_out['index'].item()] = {'psnr': step_out['psnr']}
-                # DDP
                 else:
                     for oi, index in enumerate(step_out['index']):
                         out_set[index[0].item()] = {'psnr': step_out['psnr'][oi]}
@@ -343,18 +301,12 @@ class NeuSSystem(BaseSystem):
         }      
     
     def test_epoch_end(self, out):
-        """
-        Synchronize devices.
-        Generate image sequence using test outputs.
-        """
         out = self.all_gather(out)
         if self.trainer.is_global_zero:
             out_set = {}
             for step_out in out:
-                # DP
                 if step_out['index'].ndim == 1:
                     out_set[step_out['index'].item()] = {'psnr': step_out['psnr']}
-                # DDP
                 else:
                     for oi, index in enumerate(step_out['index']):
                         out_set[index[0].item()] = {'psnr': step_out['psnr'][oi]}
@@ -368,7 +320,6 @@ class NeuSSystem(BaseSystem):
                 save_format='mp4',
                 fps=30
             )
-            
             self.export()
     
     def export(self):
