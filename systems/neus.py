@@ -56,6 +56,7 @@ class NeuSSystem(BaseSystem):
             
             self.use_prior = True
             rank_zero_info("✅ PRIOR LOADED SUCCESSFULLY: sdf_volume_smooth.npy")
+            print("✅ PRIOR LOADED SUCCESSFULLY: sdf_volume_smooth.npy")
             
         except Exception as e:
             rank_zero_info(f"⚠️ WARNING: Could not load prior: {e}")
