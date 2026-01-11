@@ -248,6 +248,11 @@ class NeuSSystem(BaseSystem):
                 sdf_pred = out['sdf_samples']
                 sdf_target = self.get_prior_sdf_at(points_3d)
                 
+                # CORRECTION : On s'assure que les deux ont la même forme
+                # Si pred est [N] et target [N, 1], on squeeze target pour avoir [N]
+                if sdf_pred.ndim == 1 and sdf_target.ndim == 2:
+                    sdf_target = sdf_target.squeeze(-1)
+                
                 loss_prior_val = F.l1_loss(sdf_pred, sdf_target)
                 
                 # Récupération du poids Lambda
