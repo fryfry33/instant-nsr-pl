@@ -116,11 +116,24 @@ class NeuSSystem(BaseSystem):
         })      
     
     # --- [MODIFICATION START] HELPER FUNCTION ---
+    # --- Remplacer cette fonction dans systems/neus.py ---
     def get_prior_sdf_at(self, points):
         if not self.use_prior:
             return torch.zeros(points.shape[0], 1, device=points.device)
         
-        # Sécurité : Si les points ne sont pas 3D, on retourne 0 pour éviter le crash
+        # --- (DEBUG) ---
+        # On affiche l'info seulement à l'étape 0, 500, 1000, etc.
+        # self.global_step est géré automatiquement par Pytorch Lightning
+        if self.global_step % 500 == 0:
+            msg = f"[DEBUG Prior] Step {self.global_step} | Input Shape: {points.shape}"
+            if points.ndim != 2 or points.shape[-1] != 3:
+                msg += " -> ⚠️ ALERTE: Points invalides (Pas 3D) ! Le Prior retourne 0."
+            else:
+                msg += " -> ✅ OK: Points 3D valides. Calcul du Prior en cours."
+            print(msg) # Cela apparaîtra dans les logs Kaggle
+        # ---------------------------
+
+        # Sécurité : Si les points ne sont pas 3D, on retourne 0
         if points.ndim != 2 or points.shape[-1] != 3:
             return torch.zeros(points.shape[0], 1, device=points.device)
 
