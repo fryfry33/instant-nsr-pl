@@ -26,35 +26,50 @@ class NeuSSystem(BaseSystem):
         self.train_num_samples = self.config.model.train_num_rays * (self.config.model.num_samples_per_ray + self.config.model.get('num_samples_per_ray_bg', 0))
         self.train_num_rays = self.config.model.train_num_rays
 
-        # --- [MODIFICATION START] LOAD PRIOR ---
-        # Update this path to where your .npy files are located
-        prior_dir = "/content/dataset82wmask/prior_data"
-        # Si le dossier n'existe pas, essayez le dossier par défaut
-        if not os.path.exists(prior_dir):
-             prior_dir = "/content/dataset82wmask/prior_data" 
+        # --- [MODIFICATION START] LOAD PRIOR VIA ENV VAR ---
+        # 1. On cherche d'abord la variable d'environnement
+        prior_dir = os.environ.get("PRIOR_DIR")
+
+        # 2. Si elle n'est pas définie, on tente un chemin par défaut (fallback)
+        if prior_dir is None:
+            # Fallback Kaggle standard
+            prior_dir = "/kaggle/working/prior_data"
+            rank_zero_info(f"⚠️ Variable PRIOR_DIR non définie. Tentative avec : {prior_dir}")
+
+        rank_zero_info(f"📁 Recherche du Prior dans : {prior_dir}")
         
         try:
-            # On cherche le fichier smooth ou standard
-            if os.path.exists(os.path.join(prior_dir, "sdf_volume_smooth.npy")):
-                path_npy = os.path.join(prior_dir, "sdf_volume_smooth.npy")
-            else:
+            # On vérifie si le fichier existe
+            # Priorité 1 : Version lissée
+            path_npy = os.path.join(prior_dir, "sdf_volume_smooth.npy")
+            if not os.path.exists(path_npy):
+                # Priorité 2 : Version standard
                 path_npy = os.path.join(prior_dir, "sdf_volume.npy")
             
-            sdf_vol_np = np.load(path_npy, allow_pickle=True)
-            
-            self.register_buffer("sdf_prior_vol", torch.from_numpy(sdf_vol_np).float().unsqueeze(0).unsqueeze(0))
-            
-            with open(os.path.join(prior_dir, "sdf_config.json"), 'r') as f:
-                meta = json.load(f)
-            
-            self.register_buffer("prior_min", torch.tensor(meta["min_bound"]).float())
-            self.register_buffer("prior_max", torch.tensor(meta["max_bound"]).float())
-            
-            self.use_prior = True
-            rank_zero_info(f"✅ PRIOR LOADED SUCCESSFULLY from {path_npy}")
-            
+            if os.path.exists(path_npy):
+                sdf_vol_np = np.load(path_npy, allow_pickle=True)
+                
+                self.register_buffer("sdf_prior_vol", torch.from_numpy(sdf_vol_np).float().unsqueeze(0).unsqueeze(0))
+                
+                # Chargement de la config JSON associée
+                config_path = os.path.join(prior_dir, "sdf_config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        meta = json.load(f)
+                    self.register_buffer("prior_min", torch.tensor(meta["min_bound"]).float())
+                    self.register_buffer("prior_max", torch.tensor(meta["max_bound"]).float())
+                    
+                    self.use_prior = True
+                    rank_zero_info(f"✅ PRIOR LOADED SUCCESSFULLY from {path_npy}")
+                else:
+                    rank_zero_info(f"❌ Erreur: sdf_config.json introuvable dans {prior_dir}")
+                    self.use_prior = False
+            else:
+                rank_zero_info(f"⚠️ Fichier .npy introuvable dans {prior_dir}. Prior désactivé.")
+                self.use_prior = False
+                
         except Exception as e:
-            rank_zero_info(f"⚠️ WARNING: Could not load prior: {e}")
+            rank_zero_info(f"⚠️ CRASH chargement Prior: {e}")
             self.use_prior = False
         # --- [MODIFICATION END] ---
 
