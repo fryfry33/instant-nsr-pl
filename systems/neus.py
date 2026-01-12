@@ -170,13 +170,14 @@ class NeuSSystem(BaseSystem):
 
     def training_step(self, batch, batch_idx):
         out = self(batch)
-
         loss = 0.
 
+        # --- DYNAMIC RAY SAMPLING ---
         if self.config.model.dynamic_ray_sampling:
             train_num_rays = int(self.train_num_rays * (self.train_num_samples / out['num_samples_full'].sum().item()))        
             self.train_num_rays = min(int(self.train_num_rays * 0.9 + train_num_rays * 0.1), self.config.model.max_train_num_rays)
 
+        # --- CALCUL DES LOSS CLASSIQUES ---
         loss_rgb_mse = F.mse_loss(out['comp_rgb_full'][out['rays_valid_full'][...,0]], batch['rgb'][out['rays_valid_full'][...,0]])
         self.log('train/loss_rgb_mse', loss_rgb_mse)
         loss += loss_rgb_mse * self.C(self.config.system.loss.lambda_rgb_mse)
@@ -203,7 +204,6 @@ class NeuSSystem(BaseSystem):
         loss += loss_sparsity * self.C(self.config.system.loss.lambda_sparsity)
 
         if self.C(self.config.system.loss.lambda_curvature) > 0:
-            assert 'sdf_laplace_samples' in out
             loss_curvature = out['sdf_laplace_samples'].abs().mean()
             self.log('train/loss_curvature', loss_curvature)
             loss += loss_curvature * self.C(self.config.system.loss.lambda_curvature)
@@ -218,52 +218,67 @@ class NeuSSystem(BaseSystem):
             self.log('train/loss_distortion_bg', loss_distortion_bg)
             loss += loss_distortion_bg * self.C(self.config.system.loss.lambda_distortion_bg)        
 
-        # --- [MODIFICATION START] PRIOR LOSS FIXED ---
+        # --- [PRIOR AVEC DECAY CONFIGURABLE] ---
         if self.use_prior and 'sdf_samples' in out:
-            points_3d = None
+            # 1. Lecture des paramètres depuis le YAML (avec valeurs par défaut de sécurité)
+            loss_cfg = self.config.system.loss
+            decay_start = loss_cfg.get('prior_decay_start', 3000)
+            decay_end = loss_cfg.get('prior_decay_end', 15000)
+            min_factor = loss_cfg.get('prior_min_factor', 0.1)
+
+            # 2. Calcul du facteur de Decay
+            current_step = self.global_step
+            if current_step < decay_start:
+                decay_factor = 1.0
+            elif current_step > decay_end:
+                decay_factor = min_factor
+            else:
+                # Interpolation linéaire
+                progress = (current_step - decay_start) / (decay_end - decay_start)
+                decay_factor = 1.0 - (1.0 - min_factor) * progress
             
-            # Cas A : Les points sont des profondeurs 1D (C'est votre BUG actuel)
+            # Log pour vérifier que ça marche
+            if self.global_step % 100 == 0:
+                self.log('train_params/prior_decay_factor', decay_factor)
+
+            # 3. Récupération des points 3D (Gestion 1D vs 3D)
+            points_3d = None
             if 'points' in out and out['points'].ndim == 1:
-                # Il faut reconstruire la 3D : Rayon_Origine + t * Rayon_Direction
                 if 'ray_indices' in out and 'rays' in batch:
-                    # batch['rays'] contient tous les rayons (N_rays, 6)
                     rays = batch['rays']
                     rays_o, rays_d = rays[:, :3], rays[:, 3:6]
-                    
-                    # ray_indices dit "le point i appartient au rayon j"
                     ray_idx = out['ray_indices'].long()
-                    
-                    # Profondeurs t
                     t_vals = out['points'] 
-                    
-                    # RECONSTRUCTION VECTORISÉE
                     points_3d = rays_o[ray_idx] + rays_d[ray_idx] * t_vals.unsqueeze(-1)
-
-            # Cas B : Les points sont déjà 3D (parfois le cas selon la config)
             elif 'points' in out and out['points'].ndim == 2 and out['points'].shape[-1] == 3:
                 points_3d = out['points']
             
-            # Si on a réussi à avoir la 3D, on calcule la loss
+            # 4. Calcul Loss et Application
             if points_3d is not None:
                 sdf_pred = out['sdf_samples']
                 sdf_target = self.get_prior_sdf_at(points_3d)
                 
-                # CORRECTION : On s'assure que les deux ont la même forme
-                # Si pred est [N] et target [N, 1], on squeeze target pour avoir [N]
+                # Fix du shape mismatch [N] vs [N, 1]
                 if sdf_pred.ndim == 1 and sdf_target.ndim == 2:
                     sdf_target = sdf_target.squeeze(-1)
                 
                 loss_prior_val = F.l1_loss(sdf_pred, sdf_target)
                 
-                # Récupération du poids Lambda
-                lambda_prior = 1.0
+                # Récupération du poids de base dans le YAML
+                base_lambda = 1.0
                 if hasattr(self.config.system.loss, 'lambda_prior'):
-                    lambda_prior = self.C(self.config.system.loss.lambda_prior)
+                    base_lambda = self.C(self.config.system.loss.lambda_prior)
+                
+                # Poids effectif = Base * Decay
+                final_lambda = base_lambda * decay_factor
                 
                 self.log('train/loss_prior', loss_prior_val)
-                loss += lambda_prior * loss_prior_val
-        # --- [MODIFICATION END] ---
+                self.log('train_params/lambda_prior_effective', final_lambda)
+                
+                loss += final_lambda * loss_prior_val
+        # ----------------------------------------
 
+        # --- REGULARIZATIONS DU MODÈLE ---
         losses_model_reg = self.model.regularizations(out)
         for name, value in losses_model_reg.items():
             self.log(f'train/loss_{name}', value)
@@ -272,8 +287,10 @@ class NeuSSystem(BaseSystem):
         
         self.log('train/inv_s', out['inv_s'], prog_bar=True)
 
+        # Logging des paramètres
         for name, value in self.config.system.loss.items():
-            if name.startswith('lambda'):
+            # On log tous les lambdas sauf le prior statique pour éviter la confusion
+            if name.startswith('lambda') and name != 'lambda_prior': 
                 self.log(f'train_params/{name}', self.C(value))
 
         self.log('train/num_rays', float(self.train_num_rays), prog_bar=True)
