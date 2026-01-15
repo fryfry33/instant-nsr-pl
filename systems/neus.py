@@ -142,7 +142,7 @@ class NeuSSystem(BaseSystem):
         # Rotation mathématique : x' = z, y' = y, z' = -x
         
         x, y, z = points[:, 0], points[:, 1], points[:, 2]
-        points_rot = torch.stack([-z, y, x], dim=-1)
+        points_rot = torch.stack([z, y, x], dim=-1)
         
         # ---------------------------------------------------------
 
