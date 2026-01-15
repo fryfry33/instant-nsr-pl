@@ -16,9 +16,57 @@ import systems
 from systems.base import BaseSystem
 from systems.criterions import PSNR, binary_cross_entropy
 
+import trimesh
 
+def debug_prior_alignment(system, output_name="debug_alignment_check.obj"):
+    """
+    Crée un nuage de points pour voir comment le Prior est orienté.
+    """
+    if system.trainer.global_rank != 0: return # Seulement sur le GPU principal
+
+    print(f"--- [DEBUG] GÉNÉRATION DU VISUEL PRIOR : {output_name} ---")
+    
+    # 1. On scanne l'espace (boîte de -1 à 1)
+    N = 64
+    x = np.linspace(-1.0, 1.0, N)
+    y = np.linspace(-1.0, 1.0, N)
+    z = np.linspace(-1.0, 1.0, N)
+    grid_x, grid_y, grid_z = np.meshgrid(x, y, z)
+    pts = np.stack([grid_x.flatten(), grid_y.flatten(), grid_z.flatten()], axis=1)
+    
+    # On envoie sur le GPU pour le calcul
+    pts_tensor = torch.from_numpy(pts).float().to(system.device)
+    
+    # 2. On demande au système : "Quelle est la distance SDF ici ?"
+    # (C'est ici que votre rotation dans get_prior_sdf_at va être testée)
+    with torch.no_grad():
+        sdf_values = system.get_prior_sdf_at(pts_tensor)
+        
+    # 3. On garde les points proches de 0 (la surface)
+    mask = sdf_values.abs().squeeze() < 0.05
+    surface_points = pts[mask.cpu().numpy()]
+    
+    if len(surface_points) > 0:
+        # 4. Sauvegarde
+        pcd = trimesh.points.PointCloud(surface_points, colors=[255, 0, 0, 255]) # Rouge
+        pcd.export(output_name)
+        print(f"✅ [DEBUG] Fichier généré : {output_name}")
+    else:
+        print("❌ [DEBUG] Aucun point trouvé (Prior hors champ ?)")
+# --------------------------------------------------------------------------
 @systems.register('neus-system')
 class NeuSSystem(BaseSystem):
+    
+    def on_train_start(self):
+        """
+        Cette méthode est appelée automatiquement par Pytorch Lightning
+        juste avant de commencer la boucle d'entraînement.
+        """
+        # On lance le debug immédiatement
+        if self.use_prior:
+            debug_prior_alignment(self, "debug_prior_orientation.obj")
+    
+    
     def prepare(self):
         self.criterions = {
             'psnr': PSNR()
