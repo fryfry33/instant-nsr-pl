@@ -184,21 +184,11 @@ class NeuSSystem(BaseSystem):
         if not self.use_prior:
             return torch.zeros(points.shape[0], 1, device=points.device)
         
-        # --- CORRECTION DE ROTATION (90° Axe Y - Sens Direct) ---
-        # Si le Prior est tourné de +90° par rapport à NeuS, 
-        # on doit tourner nos points de requête pour "attraper" le volume au bon endroit.
-        # Rotation mathématique : x' = z, y' = y, z' = -x
-        
-        x, y, z = points[:, 0], points[:, 1], points[:, 2]
-        points_rot = torch.stack([z, y, x], dim=-1)
-        
-        # ---------------------------------------------------------
-
         denom = self.prior_max - self.prior_min
         denom = torch.where(denom == 0, torch.ones_like(denom), denom)
         
         # IMPORTANT : On utilise points_rot ici !
-        points_norm = 2 * (points_rot - self.prior_min) / denom - 1
+        points_norm = 2 * (points - self.prior_min) / denom - 1
         
         # ... suite de la fonction inchangée (grid_sample, etc.) ...
         grid_coords = points_norm.view(1, 1, 1, -1, 3)
