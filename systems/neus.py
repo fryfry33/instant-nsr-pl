@@ -193,7 +193,7 @@ class NeuSSystem(BaseSystem):
         # MeshLab (Delta) : [0.17, 0.00, -0.03]
         # Nouveau Total : [0.20, -0.01, 0.02]
         
-        correction_vector = torch.tensor([0.19, -0.01, 0.03], device=points.device)
+        correction_vector = torch.tensor([0.19, -0.001, 0.4], device=points.device)
         
         # On soustrait le vecteur total pour aligner
         points_corrected = points - correction_vector
