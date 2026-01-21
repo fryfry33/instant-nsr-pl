@@ -182,25 +182,24 @@ class NeuSSystem(BaseSystem):
     # --- Remplacer cette fonction dans systems/neus.py ---
     def get_prior_sdf_at(self, points):
         """
-        Version finale calibrée avec MeshLab.
-        Translation : X=0.03, Y=-0.01, Z=0.05
+        Version V2 calibrée (Cumul : Ancien 0.03 + Nouveau 0.17).
+        Total Translation : X=0.20, Y=-0.01, Z=0.02
         """
         if not self.use_prior:
             return torch.zeros(points.shape[0], 1, device=points.device)
         
-        # --- CALIBRAGE MESHLAB ---
-        # Matrice relevée : [0.03, -0.01, 0.05]
-        # On soustrait ce vecteur pour aligner les espaces.
+        # --- CALIBRAGE CUMULÉ ---
+        # Ancien : [0.03, -0.01, 0.05]
+        # MeshLab (Delta) : [0.17, 0.00, -0.03]
+        # Nouveau Total : [0.20, -0.01, 0.02]
         
-        # X = 0.03, Y = -0.01, Z = 0.05
-        correction_vector = torch.tensor([0.03, -0.01, 0.05], device=points.device)
+        correction_vector = torch.tensor([0.20, -0.01, 0.02], device=points.device)
         
-        # On applique la correction inverse (Soustraction)
+        # On soustrait le vecteur total pour aligner
         points_corrected = points - correction_vector
         
         # -----------------------------------------------------
 
-        # Normalisation Standard
         denom = self.prior_max - self.prior_min
         denom = torch.where(denom == 0, torch.ones_like(denom), denom)
         
