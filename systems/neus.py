@@ -181,17 +181,33 @@ class NeuSSystem(BaseSystem):
     # --- [MODIFICATION START] HELPER FUNCTION ---
     # --- Remplacer cette fonction dans systems/neus.py ---
     def get_prior_sdf_at(self, points):
+        """
+        Version finale calibrée avec MeshLab.
+        Translation : X=0.03, Y=-0.01, Z=0.05
+        """
         if not self.use_prior:
             return torch.zeros(points.shape[0], 1, device=points.device)
         
+        # --- CALIBRAGE MESHLAB ---
+        # Matrice relevée : [0.03, -0.01, 0.05]
+        # On soustrait ce vecteur pour aligner les espaces.
+        
+        # X = 0.03, Y = -0.01, Z = 0.05
+        correction_vector = torch.tensor([0.03, -0.01, 0.05], device=points.device)
+        
+        # On applique la correction inverse (Soustraction)
+        points_corrected = points - correction_vector
+        
+        # -----------------------------------------------------
+
+        # Normalisation Standard
         denom = self.prior_max - self.prior_min
         denom = torch.where(denom == 0, torch.ones_like(denom), denom)
         
-        # IMPORTANT : On utilise points_rot ici !
-        points_norm = 2 * (points - self.prior_min) / denom - 1
+        points_norm = 2 * (points_corrected - self.prior_min) / denom - 1
         
-        # ... suite de la fonction inchangée (grid_sample, etc.) ...
         grid_coords = points_norm.view(1, 1, 1, -1, 3)
+        
         prior_values = F.grid_sample(
             self.sdf_prior_vol, 
             grid_coords, 
