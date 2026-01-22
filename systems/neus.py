@@ -191,7 +191,7 @@ class NeuSSystem(BaseSystem):
         # --- CALIBRAGE CUMULÉ ---
         # Nouveau Total : [0.20, -0.01, 0.02]
         
-        correction_vector = torch.tensor([0.187, -0.01, 0.035], device=points.device)
+        correction_vector = torch.tensor([0.193, -0.01, 0.042], device=points.device)
         
         # On soustrait le vecteur total pour aligner
         points_corrected = points - correction_vector
