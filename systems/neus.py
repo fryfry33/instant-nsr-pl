@@ -189,11 +189,9 @@ class NeuSSystem(BaseSystem):
             return torch.zeros(points.shape[0], 1, device=points.device)
         
         # --- CALIBRAGE CUMULÉ ---
-        # Ancien : [0.03, -0.01, 0.05]
-        # MeshLab (Delta) : [0.17, 0.00, -0.03]
         # Nouveau Total : [0.20, -0.01, 0.02]
         
-        correction_vector = torch.tensor([0.19, -0.01, 0.04], device=points.device)
+        correction_vector = torch.tensor([0.187, -0.01, 0.035], device=points.device)
         
         # On soustrait le vecteur total pour aligner
         points_corrected = points - correction_vector
