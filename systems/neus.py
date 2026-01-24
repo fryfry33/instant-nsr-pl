@@ -191,7 +191,7 @@ class NeuSSystem(BaseSystem):
         # --- CALIBRAGE CUMULÉ ---
         # Nouveau Total : [0.20, -0.01, 0.02]
         # camobrage pour gaparini [0.20, -0.02, 0.02]
-        correction_vector = torch.tensor([0.0, 0.0, 0.0], device=points.device)
+        correction_vector = torch.tensor([-0.1, -0.01, 0.01], device=points.device)
         
         # On soustrait le vecteur total pour aligner
         points_corrected = points - correction_vector
